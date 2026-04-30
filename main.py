@@ -2,66 +2,89 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
+import plotly.express as px
 
-# Configuración de página
-st.set_page_config(page_title="Gestor de Negocio", layout="wide")
+# 1. SEGURIDAD: Configura tu contraseña aquí
+PASSWORD = "mi_clave_secreta" # <--- CAMBIA ESTO
 
-# Conexión a Base de Datos
-conn = sqlite3.connect('datos_negocio.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('''CREATE TABLE IF NOT EXISTS movimientos
-             (fecha TEXT, tipo TEXT, concepto TEXT, total REAL, iva REAL, metodo TEXT, estado TEXT)''')
-conn.commit()
+def login():
+    if "authenticated" not in st.session_state:
+        st.session_state["authenticated"] = False
+    
+    if not st.session_state["authenticated"]:
+        st.title("🔐 Acceso Privado")
+        input_pass = st.text_input("Introduce la contraseña de tu negocio", type="password")
+        if st.button("Entrar"):
+            if input_pass == PASSWORD:
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Contraseña incorrecta")
+        return False
+    return True
 
-st.title("📊 Control de Beneficios Reales")
+if login():
+    # --- LA APP EMPIEZA AQUÍ ---
+    st.set_page_config(page_title="Gestor Pro", layout="wide")
+    
+    conn = sqlite3.connect('datos_negocio.db', check_same_thread=False)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS movimientos
+                 (fecha TEXT, tipo TEXT, concepto TEXT, total REAL, iva REAL, metodo TEXT, estado TEXT)''')
+    conn.commit()
 
-# BARRA LATERAL - ENTRADA DE DATOS
-with st.sidebar:
-    st.header("📝 Registrar Nuevo Dato")
-    with st.form("formulario"):
-        tipo = st.selectbox("Categoría", ["Factura Emitida (Venta)", "Factura Recibida (Gasto)", "Nómina", "Seguridad Social", "Impuestos (Trimestre)"])
-        concepto = st.text_input("Detalle (Ej: Cliente X, Alquiler, IRPF)")
-        monto = st.number_input("Importe Total (€)", min_value=0.0, step=0.01)
-        metodo = st.radio("Método", ["Banco", "Efectivo (Metálico)"])
-        estado = st.selectbox("Estado", ["Abonado/Cobrado", "Pendiente"])
-        
-        # Lógica de IVA
-        if "Factura" in tipo:
-            iva_opcion = st.selectbox("IVA Aplicado", [21, 10, 4, 0])
-            base_imponible = monto / (1 + iva_opcion/100)
-            iva_valor = monto - base_imponible
-        else:
-            iva_valor = 0.0 # Nóminas e impuestos no llevan IVA desglosado aquí
+    st.title("📊 Panel de Control y Beneficio Real")
+
+    # BARRA LATERAL
+    with st.sidebar:
+        st.header("📝 Nuevo Registro")
+        with st.form("form_registro"):
+            tipo = st.selectbox("Categoría", ["Factura Emitida (Venta)", "Factura Recibida (Gasto)", "Nómina", "Seguridad Social", "Impuestos"])
+            concepto = st.text_input("Detalle")
+            monto = st.number_input("Importe Total (€)", min_value=0.0)
+            metodo = st.radio("Método", ["Banco", "Efectivo"])
+            estado = st.selectbox("Estado", ["Abonado/Cobrado", "Pendiente"])
             
-        enviado = st.form_submit_button("Guardar en la Nube")
+            # Lógica de IVA simplificada
+            iva_opcion = st.selectbox("IVA %", [21, 10, 4, 0]) if "Factura" in tipo else 0
+            
+            if st.form_submit_button("Guardar"):
+                base = monto / (1 + iva_opcion/100)
+                iva_v = monto - base
+                c.execute("INSERT INTO movimientos VALUES (?,?,?,?,?,?,?)",
+                          (datetime.now().strftime("%Y-%m-%d"), tipo, concepto, monto, iva_v, metodo, estado))
+                conn.commit()
+                st.success("¡Registrado!")
+
+    # CÁLCULOS Y GRÁFICOS
+    df = pd.read_sql_query("SELECT * FROM movimientos", conn)
+
+    if not df.empty:
+        # KPIs Principales
+        ingresos = df[df['tipo'] == "Factura Emitida (Venta)"]['total'].sum()
+        gastos = df[df['tipo'] != "Factura Emitida (Venta)"]['total'].sum()
+        beneficio = ingresos - gastos
         
-        if enviado:
-            c.execute("INSERT INTO movimientos VALUES (?,?,?,?,?,?,?)",
-                      (datetime.now().strftime("%Y-%m-%d"), tipo, concepto, monto, iva_valor, metodo, estado))
-            conn.commit()
-            st.success("¡Guardado!")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ingresos Totales", f"{ingresos:,.2f}€")
+        c2.metric("Gastos Totales", f"{gastos:,.2f}€")
+        c3.metric("Beneficio Neto", f"{beneficio:,.2f}€", delta=f"{beneficio:,.2f}€")
 
-# CUERPO PRINCIPAL - CÁLCULOS
-df = pd.read_sql_query("SELECT * FROM movimientos", conn)
+        # NUEVO: Gráfico de Comparación
+        st.write("### Visualización de Rendimiento")
+        df_chart = pd.DataFrame({
+            "Categoría": ["Ingresos", "Gastos"],
+            "Monto": [ingresos, gastos]
+        })
+        fig = px.bar(df_chart, x="Categoría", y="Monto", color="Categoría", 
+                     color_discrete_map={"Ingresos": "#2ecc71", "Gastos": "#e74c3c"})
+        st.plotly_chart(fig, use_container_width=True)
 
-if not df.empty:
-    # Cálculos Inteligentes
-    ventas_cobradas = df[(df['tipo'] == "Factura Emitida (Venta)") & (df['estado'] == "Abonado/Cobrado")]['total'].sum()
-    iva_repercutido = df[df['tipo'] == "Factura Emitida (Venta)"]['iva'].sum()
-    iva_soportado = df[df['tipo'] == "Factura Recibida (Gasto)"]['iva'].sum()
-    
-    gastos_totales = df[df['tipo'] != "Factura Emitida (Venta)"]['total'].sum()
-    
-    beneficio_real = ventas_cobradas - gastos_totales - (iva_repercutido - iva_soportado)
-
-    # Visualización de KPIs
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Ventas Cobradas", f"{ventas_cobradas:,.2f}€")
-    c2.metric("Gastos (con Nóminas)", f"{gastos_totales:,.2f}€")
-    c3.metric("IVA a Liquidar", f"{(iva_repercutido - iva_soportado):,.2f}€", delta_color="inverse")
-    c4.metric("BENEFICIO REAL NETO", f"{beneficio_real:,.2f}€")
-
-    st.write("### Historial Completo")
-    st.dataframe(df.sort_index(ascending=False), use_container_width=True)
-else:
-    st.info("La base de datos está vacía. Empieza registrando algo en el menú de la izquierda.")
+        st.write("### Historial de Movimientos")
+        st.dataframe(df.sort_index(ascending=False), use_container_width=True)
+        
+        if st.button("Cerrar Sesión"):
+            st.session_state["authenticated"] = False
+            st.rerun()
+    else:
+        st.info("Añade tu primer movimiento para ver las estadísticas.")
