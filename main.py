@@ -2,89 +2,112 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from datetime import datetime
-import plotly.express as px
 
-# 1. SEGURIDAD: Configura tu contraseña aquí
-PASSWORD = "mi_clave_secreta" # <--- CAMBIA ESTO
+# --- CONFIGURACIÓN Y SEGURIDAD ---
+PASSWORD = "mi_clave_secreta"
 
-def login():
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
-    
-    if not st.session_state["authenticated"]:
-        st.title("🔐 Acceso Privado")
-        input_pass = st.text_input("Introduce la contraseña de tu negocio", type="password")
-        if st.button("Entrar"):
-            if input_pass == PASSWORD:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Contraseña incorrecta")
-        return False
-    return True
-
-if login():
-    # --- LA APP EMPIEZA AQUÍ ---
-    st.set_page_config(page_title="Gestor Pro", layout="wide")
-    
-    conn = sqlite3.connect('datos_negocio.db', check_same_thread=False)
+def init_db():
+    conn = sqlite3.connect('negocio_v3.db', check_same_thread=False)
     c = conn.cursor()
+    # Nueva tabla con campos desglosados y ID único
     c.execute('''CREATE TABLE IF NOT EXISTS movimientos
-                 (fecha TEXT, tipo TEXT, concepto TEXT, total REAL, iva REAL, metodo TEXT, estado TEXT)''')
+                 (id_ref TEXT PRIMARY KEY, fecha TEXT, tipo TEXT, concepto TEXT, 
+                  base_imponible REAL, iva_porcentaje REAL, iva_cuota REAL, 
+                  total_bruto REAL, liquido REAL, irpf REAL, ss REAL, 
+                  extra_cash REAL, metodo TEXT, estado TEXT)''')
     conn.commit()
+    return conn
 
-    st.title("📊 Panel de Control y Beneficio Real")
+conn = init_db()
 
-    # BARRA LATERAL
-    with st.sidebar:
-        st.header("📝 Nuevo Registro")
-        with st.form("form_registro"):
-            tipo = st.selectbox("Categoría", ["Factura Emitida (Venta)", "Factura Recibida (Gasto)", "Nómina", "Seguridad Social", "Impuestos"])
-            concepto = st.text_input("Detalle")
-            monto = st.number_input("Importe Total (€)", min_value=0.0)
-            metodo = st.radio("Método", ["Banco", "Efectivo"])
-            estado = st.selectbox("Estado", ["Abonado/Cobrado", "Pendiente"])
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("🔐 Acceso Privado")
+    if st.text_input("Contraseña", type="password") == PASSWORD:
+        if st.button("Entrar"):
+            st.session_state["authenticated"] = True
+            st.rerun()
+    st.stop()
+
+# --- INTERFAZ PRINCIPAL ---
+st.title("🚀 Gestión de Negocio V3.0")
+
+menu = st.sidebar.selectbox("Acciones", ["Registrar Movimiento", "Historial y Edición", "Análisis de Beneficio"])
+
+if menu == "Registrar Movimiento":
+    st.header("📝 Nueva Entrada")
+    
+    tipo = st.selectbox("Tipo de Registro", ["Venta (Factura Emitida)", "Gasto (Factura Recibida)", "Nómina Empleado"])
+    
+    with st.form("form_v3"):
+        id_ref = st.text_input("ID / Nº Factura (Único)", help="No se puede repetir")
+        concepto = st.text_input("Concepto / Nombre")
+        fecha = st.date_input("Fecha", datetime.now())
+        
+        # LÓGICA DE FACTURAS
+        if "Factura" in tipo:
+            col1, col2 = st.columns(2)
+            base = col1.number_input("Base Imponible (€)", min_value=0.0, format="%.2f")
+            iva_p = col2.selectbox("IVA %", [21, 10, 4, 0])
             
-            # Lógica de IVA simplificada
-            iva_opcion = st.selectbox("IVA %", [21, 10, 4, 0]) if "Factura" in tipo else 0
+            cuota_iva = base * (iva_p / 100)
+            total = base + cuota_iva
+            st.info(f"Cálculo: IVA {cuota_iva:.2f}€ | Total Bruto: {total:.2f}€")
             
-            if st.form_submit_button("Guardar"):
-                base = monto / (1 + iva_opcion/100)
-                iva_v = monto - base
-                c.execute("INSERT INTO movimientos VALUES (?,?,?,?,?,?,?)",
-                          (datetime.now().strftime("%Y-%m-%d"), tipo, concepto, monto, iva_v, metodo, estado))
+            # Campos de nómina vacíos
+            liq, irpf, ss, extra = 0.0, 0.0, 0.0, 0.0
+            
+        # LÓGICA DE NÓMINAS
+        else:
+            col1, col2 = st.columns(2)
+            liq = col1.number_input("Líquido a percibir (€)", min_value=0.0)
+            irpf = col2.number_input("Retención IRPF (€)", min_value=0.0)
+            ss = col1.number_input("Seguridad Social (€)", min_value=0.0)
+            extra = col2.number_input("Extra en Efectivo (€)", min_value=0.0)
+            
+            total = liq + irpf + ss + extra
+            base, iva_p, cuota_iva = 0.0, 0, 0.0
+            st.warning(f"Coste Total para el negocio: {total:.2f}€")
+
+        metodo = st.radio("Método de Pago", ["Banco", "Efectivo"])
+        estado = st.selectbox("Estado", ["Completado", "Pendiente"])
+        archivo = st.file_uploader("Subir foto/recibo (Simulación)", type=["jpg", "png", "pdf"])
+
+        if st.form_submit_button("Guardar Registro"):
+            try:
+                c = conn.cursor()
+                c.execute("INSERT INTO movimientos VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (id_ref, fecha.strftime("%Y-%m-%d"), tipo, concepto, base, iva_p, cuota_iva, total, liq, irpf, ss, extra, metodo, estado))
                 conn.commit()
-                st.success("¡Registrado!")
+                st.success("✅ Guardado con éxito")
+            except sqlite3.IntegrityError:
+                st.error("❌ ERROR: El ID / Nº de Factura ya existe. No se permiten duplicados.")
 
-    # CÁLCULOS Y GRÁFICOS
+elif menu == "Historial y Edición":
+    st.header("📋 Listado de Movimientos")
     df = pd.read_sql_query("SELECT * FROM movimientos", conn)
-
+    
     if not df.empty:
-        # KPIs Principales
-        ingresos = df[df['tipo'] == "Factura Emitida (Venta)"]['total'].sum()
-        gastos = df[df['tipo'] != "Factura Emitida (Venta)"]['total'].sum()
-        beneficio = ingresos - gastos
+        st.dataframe(df)
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Ingresos Totales", f"{ingresos:,.2f}€")
-        c2.metric("Gastos Totales", f"{gastos:,.2f}€")
-        c3.metric("Beneficio Neto", f"{beneficio:,.2f}€", delta=f"{beneficio:,.2f}€")
-
-        # NUEVO: Gráfico de Comparación
-        st.write("### Visualización de Rendimiento")
-        df_chart = pd.DataFrame({
-            "Categoría": ["Ingresos", "Gastos"],
-            "Monto": [ingresos, gastos]
-        })
-        fig = px.bar(df_chart, x="Categoría", y="Monto", color="Categoría", 
-                     color_discrete_map={"Ingresos": "#2ecc71", "Gastos": "#e74c3c"})
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.write("### Historial de Movimientos")
-        st.dataframe(df.sort_index(ascending=False), use_container_width=True)
-        
-        if st.button("Cerrar Sesión"):
-            st.session_state["authenticated"] = False
+        st.subheader("🛠 Editar Registro")
+        id_edit = st.selectbox("Selecciona el ID para modificar", df['id_ref'].tolist())
+        if st.button("Eliminar Registro"):
+            conn.cursor().execute("DELETE FROM movimientos WHERE id_ref=?", (id_edit,))
+            conn.commit()
             st.rerun()
     else:
-        st.info("Añade tu primer movimiento para ver las estadísticas.")
+        st.info("No hay datos registrados.")
+
+elif menu == "Análisis de Beneficio":
+    df = pd.read_sql_query("SELECT * FROM movimientos", conn)
+    if not df.empty:
+        ingresos = df[df['tipo'] == "Venta (Factura Emitida)"]['total_bruto'].sum()
+        gastos = df[df['tipo'] != "Venta (Factura Emitida)"]['total_bruto'].sum()
+        
+        st.metric("Beneficio Bruto", f"{ingresos - gastos:,.2f}€")
+        # Aquí podrías añadir los gráficos de Plotly que vimos antes
+    else:
+        st.info("Sin datos para analizar.")
